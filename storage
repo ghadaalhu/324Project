@@ -1,1 +1,164 @@
 #this code is done by ghadah and norah
+# ===== IMPORTS =====
+import sqlite3
+from datetime import datetime
+from random import randint
+from typing import Tuple, Optional, Dict, Any
+
+# ===== CONSTANTS =====
+DB_NAME = "KSUpay.db"
+ADMIN_ID = "1111111111"
+ADMIN_PASSWORD = "000000"
+
+# ===== DATABASE (GENERAL) =====
+def get_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def current_datetime() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def generate_wallet_number(conn: sqlite3.Connection) -> str:
+    while True:
+        wallet = str(randint(10*9, 10*10 - 1))
+        row = conn.execute(
+            "SELECT wallet_number FROM wallets WHERE wallet_number = ?",
+            (wallet,),
+        ).fetchone()
+        if row is None:
+            return wallet
+
+
+def init_db() -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # students
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS students (
+        student_id TEXT PRIMARY KEY,
+        first_name TEXT,
+        last_name TEXT,
+        password TEXT,
+        email TEXT,
+        phone TEXT,
+        created_at TEXT
+    )
+    """)
+
+    # admins
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS admins (
+        admin_id TEXT PRIMARY KEY,
+        password TEXT,
+        first_name TEXT,
+        last_name TEXT
+    )
+    """)
+
+    # wallets
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS wallets (
+        wallet_number TEXT PRIMARY KEY,
+        owner_type TEXT,
+        owner_id TEXT,
+        balance REAL,
+        created_at TEXT
+    )
+    """)
+
+    # default admin
+    cur.execute("""
+    INSERT OR IGNORE INTO admins (admin_id, password, first_name, last_name)
+    VALUES (?, ?, ?, ?)
+    """, (ADMIN_ID, ADMIN_PASSWORD, "Admin", "User"))
+
+    conn.commit()
+    conn.close()
+
+# ===== AUTH (SIGNUP + LOGIN) =====
+
+def register_student(
+    first_name: str,
+    last_name: str,
+    student_id: str,
+    password: str,
+    email: str,
+    phone: str,
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+
+    conn = get_connection()
+    try:
+        existing = conn.execute(
+            "SELECT student_id FROM students WHERE student_id = ?",
+            (student_id,),
+        ).fetchone()
+
+        if existing:
+            return False, "Student already exists", None
+
+        wallet_number = generate_wallet_number(conn)
+        created_at = current_datetime()
+
+        # insert student
+        conn.execute("""
+        INSERT INTO students (student_id, first_name, last_name, password, email, phone, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (student_id, first_name, last_name, password, email, phone, created_at))
+
+        # create wallet
+        conn.execute("""
+        INSERT INTO wallets (wallet_number, owner_type, owner_id, balance, created_at)
+        VALUES (?, 'student', ?, ?, ?)
+        """, (wallet_number, student_id, 1000.0, created_at))
+
+        conn.commit()
+
+        return True, "Registered", {
+            "wallet_number": wallet_number,
+            "balance": 1000.0
+        }
+
+    except sqlite3.Error as e:
+        return False, f"Error: {e}", None
+
+    finally:
+        conn.close()
+
+
+def login_user(
+    user_id: str,
+    password: str
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+
+    conn = get_connection()
+    try:
+        # check student
+        student = conn.execute("""
+        SELECT s.student_id, s.first_name, s.last_name,
+               w.wallet_number, w.balance
+        FROM students s
+        JOIN wallets w ON w.owner_id = s.student_id
+        WHERE s.student_id = ? AND s.password = ?
+        """, (user_id, password)).fetchone()
+
+        if student:
+            return True, "student", dict(student)
+
+        # check admin
+        admin = conn.execute("""
+        SELECT admin_id, first_name, last_name
+        FROM admins
+        WHERE admin_id = ? AND password = ?
+        """, (user_id, password)).fetchone()
+
+        if admin:
+            return True, "admin", dict(admin)
+
+        return False, "Invalid credentials", None
+
+    finally:
+        conn.close()
